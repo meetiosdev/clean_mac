@@ -101,7 +101,7 @@ clean_files() {
     echo $total
 }
 
-# Clean Downloads folder: zip/folder pairs and images (moves to Trash)
+# Clean Downloads folder: zip/folder pairs, images, and other cleanup (moves to Trash)
 clean_downloads() {
     local downloads_dir="${1:-$HOME/Downloads}"
     [ ! -d "$downloads_dir" ] && echo 0 && return 0
@@ -111,7 +111,8 @@ clean_downloads() {
     local trash_dir="$HOME/.Trash/Downloads_Cleanup_${timestamp}"
     mkdir -p "$trash_dir" 2>/dev/null || true
     
-    # Find all zip files
+    # 1. Remove .zip files if there's an unzipped folder with the same name
+    info "Checking zip files with matching folders..." >&2
     while IFS= read -r zip_file; do
         if [ -f "$zip_file" ]; then
             # Get zip file name without extension
@@ -134,6 +135,61 @@ clean_downloads() {
             fi
         fi
     done < <(find "$downloads_dir" -maxdepth 1 -name "*.zip" -type f 2>/dev/null)
+    
+    # 2. Move remaining .zip files to Trash (those without matching folders)
+    info "Moving remaining .zip files to Trash..." >&2
+    while IFS= read -r zip_file; do
+        if [ -f "$zip_file" ]; then
+            local zip_basename=$(basename "$zip_file" .zip)
+            local zip_dirname=$(dirname "$zip_file")
+            local matching_folder="$zip_dirname/$zip_basename"
+            
+            # Only move if no matching folder exists
+            if [ ! -d "$matching_folder" ]; then
+                local size=$(stat -f%z "$zip_file" 2>/dev/null || stat -c%s "$zip_file" 2>/dev/null || echo 0)
+                total=$((total + size))
+                mv "$zip_file" "$trash_dir/" 2>/dev/null || true
+            fi
+        fi
+    done < <(find "$downloads_dir" -maxdepth 1 -name "*.zip" -type f 2>/dev/null)
+    
+    # 3. Move .txt files to Trash
+    info "Moving .txt files to Trash..." >&2
+    while IFS= read -r txt_file; do
+        if [ -f "$txt_file" ]; then
+            local size=$(stat -f%z "$txt_file" 2>/dev/null || stat -c%s "$txt_file" 2>/dev/null || echo 0)
+            total=$((total + size))
+            mv "$txt_file" "$trash_dir/" 2>/dev/null || true
+        fi
+    done < <(find "$downloads_dir" -maxdepth 1 -name "*.txt" -type f 2>/dev/null)
+    
+    # 4. Move all files under 100KB to Trash
+    info "Moving files under 100KB to Trash..." >&2
+    local size_limit=$((100 * 1024))  # 100KB in bytes
+    while IFS= read -r small_file; do
+        if [ -f "$small_file" ]; then
+            local size=$(stat -f%z "$small_file" 2>/dev/null || stat -c%s "$small_file" 2>/dev/null || echo 0)
+            if [ $size -lt $size_limit ] && [ $size -gt 0 ]; then
+                total=$((total + size))
+                mv "$small_file" "$trash_dir/" 2>/dev/null || true
+            fi
+        fi
+    done < <(find "$downloads_dir" -maxdepth 1 -type f 2>/dev/null)
+    
+    # 5. Move all folders containing .xcodeproj files to Trash
+    info "Moving folders containing .xcodeproj files to Trash..." >&2
+    for folder in "$downloads_dir"/*; do
+        if [ -d "$folder" ]; then
+            local folder_name=$(basename "$folder")
+            # Check if this folder (or any subfolder) contains .xcodeproj
+            if find "$folder" -name "*.xcodeproj" -type d 2>/dev/null | head -1 | grep -q .; then
+                local folder_size=$(get_size "$folder")
+                total=$((total + folder_size))
+                mv "$folder" "$trash_dir/" 2>/dev/null || true
+                info "Moved Xcode project folder to Trash: $folder_name ($(bytes_to_human $folder_size))" >&2
+            fi
+        fi
+    done
     
     # Move .png files to Trash (but not in subdirectories, only in Downloads root)
     while IFS= read -r png_file; do
@@ -187,7 +243,7 @@ main() {
     echo "  • Time Machine snapshots"
     echo "  • Installer files (DMG/PKG)"
     echo "  • Homebrew caches"
-    echo "  • Downloads: zip/folder pairs, .png/.jpg files"
+    echo "  • Downloads: zip files, .txt files, small files (<100KB), Xcode projects"
     echo ""
     echo -e "${GREEN}Note: All deleted files/folders will be moved to Trash${NC}"
     echo -e "${GREEN}      (except system files that require deletion)${NC}"
@@ -311,7 +367,12 @@ main() {
     
     # SECTION 10: Downloads Cleanup
     section "10. Downloads Folder Cleanup"
-    info "Cleaning Downloads: zip/folder pairs, .png and .jpg files" >&2
+    info "Cleaning Downloads:" >&2
+    info "  • Zip files (with matching folders or standalone)" >&2
+    info "  • .txt files" >&2
+    info "  • Files under 100KB" >&2
+    info "  • Folders containing .xcodeproj files" >&2
+    info "  • .png and .jpg files" >&2
     info "Protecting: .HEIC and .jpeg files" >&2
     freed=$(clean_downloads "$HOME/Downloads")
     add_freed $freed
